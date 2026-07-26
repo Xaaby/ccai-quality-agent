@@ -1,10 +1,24 @@
-# ccai-quality-agent
+# CCAI Quality Agent
 
-**Contact Center Compliance & Quality Agent** — A GCP-native AI agent that analyzes customer service call transcripts for PCI-DSS violations, scores call quality across 10 dimensions, and generates supervisor coaching tickets.
+A GCP-native AI agent that analyzes customer service call transcripts for PCI-DSS violations, scores call quality across 10 dimensions, and generates supervisor coaching tickets — deployed on Cloud Run with Gemini 2.5 Flash.
 
-> **Genesys native QA: 50 evals/day cap, 20-min delay, no timestamp analysis. This agent fills the gap.**
+**Live demo:** [https://ccai-quality-agent-786562162192.us-central1.run.app](https://ccai-quality-agent-786562162162.us-central1.run.app)
 
-Live URL: https://ccai-quality-agent-786562162192.us-central1.run.app
+**Stack:** Python 3.11 · Streamlit · Gemini 2.5 Flash · Pydantic · SQLite · Cloud Run · GitHub Actions
+
+---
+
+## Why This Exists
+
+Genesys native QA has documented operational gaps — 50 evaluations per agent per day cap, up to 20 minutes to generate results after call completion, and no ability to return timestamp offsets for violations. This agent fills those gaps as a **complement to Genesys, not a replacement.**
+
+| Capability | Genesys Native QA | This Agent |
+|---|---|---|
+| Daily eval cap | 50/agent/day | No cap |
+| Time to results | Up to 20 minutes | Seconds |
+| Timestamp offsets on violations | ✗ Not supported | ✓ Exact offset returned |
+| PCI PAN/CVV detection | ✗ Out of scope | ✓ Luhn-validated, deterministic |
+| Scores as audit records | Recomputed | Cached — same input, same output, always |
 
 ---
 
@@ -16,184 +30,161 @@ User → Streamlit Frontend (Cloud Run, port 8080)
              ▼
        app/agent.py  ←  Gemini 2.5 Flash tool-calling loop (AFC disabled)
              │
-       ┌─────┴──────────────────────────────────────────┐
-       │                                                 │
-       ▼                                                 ▼
-Tool 1: audit_pci_compliance()          Tool 2: score_call_quality()
-  · regex + Luhn ONLY                     · Gemini 2.5 Flash
-  · zero Gemini calls                     · Pydantic response_schema
-  · deterministic output                  · 10 dimensions, 1-5 integer
-  · timestamp offsets                     · cache-first (no re-scoring)
-       │                                                 │
-       └─────────────────┬───────────────────────────────┘
-                         ▼
-              Tool 3: generate_remediation_ticket()
-                · fires when CRITICAL/HIGH violation OR score < 3.0
-                · Gemini structured output coaching script
-                · writes to SQLite for audit trail
-                         │
-                         ▼
-              SQLite: pipeline_calls.db
-              (baked into Docker image at build time)
-              Tables: calls, pci_findings, qa_scorecards,
-                      remediation_tickets, analysis_cache
+       ┌─────┴───────────────────────────────────────────┐
+       │                                                  │
+       ▼                                                  ▼
+Tool 1: audit_pci_compliance()           Tool 2: score_call_quality()
+  · regex + Luhn ONLY                      · Gemini 2.5 Flash
+  · zero Gemini calls                      · Pydantic response_schema
+  · deterministic output                   · 10 dimensions, 1–5 integer
+  · timestamp offsets                      · cache-first (no re-scoring)
+       │                                                  │
+       └──────────────────┬───────────────────────────────┘
+                          ▼
+               Tool 3: generate_remediation_ticket()
+                 · fires when CRITICAL/HIGH violation OR score < 3.0
+                 · returns None when clean (no false-positive tickets)
+                 · writes to SQLite for audit trail
+                          │
+                          ▼
+               SQLite: pipeline_calls.db
+               Tables: calls · pci_findings · qa_scorecards
+                       remediation_tickets · analysis_cache
 ```
 
-**Why Genesys Gold Partners care:**
-- No 50 eval/day cap — processes any volume instantly
-- Results in seconds vs. up to 20 minutes for Genesys native AI Scoring
-- Returns **exact timestamp offsets** for violations — Genesys native QA cannot do this
-- PCI-DSS PAN/CVV detection with Luhn algorithm — beyond Genesys's native scope
-- Cache layer ensures scores are audit records: same input → same output, always
+**Single process on Cloud Run** — Streamlit is the only listener on port 8080. All tool logic is imported directly. No FastAPI, no two-port setup.
 
 ---
 
-## Tech Stack
+## The Three Tools
 
-| Component | Choice | Version |
-|---|---|---|
-| Language | Python | 3.11 |
-| Frontend | Streamlit | >=1.35.0 |
-| Agent SDK | google-genai (native) | >=0.8.0 |
-| LLM | Gemini 2.5 Flash | `gemini-2.5-flash` |
-| Data validation | Pydantic | >=2.0 |
-| Data store | SQLite | Python stdlib |
-| PCI detection | Python `re` + Luhn | stdlib only |
-| Container | Docker | python:3.11-slim |
-| Registry | GCP Artifact Registry | us-central1 |
-| Hosting | GCP Cloud Run | us-central1, port 8080 |
-| CI/CD | GitHub Actions + WIF | On push to `main` |
-| Secrets | GCP Secret Manager | `GEMINI_API_KEY` |
+### Tool 1 — `audit_pci_compliance()` · Deterministic · Zero Gemini
+
+Detection logic is pure Python — no LLM involved:
+
+- **PAN detection:** 16-digit regex + Luhn algorithm validation → `PCI_UNMASKED_PAN` (CRITICAL)
+- **CVV detection:** 3–4 digits near security code keywords → `PCI_UNMASKED_CVV` (CRITICAL)
+- **Missing recording disclosure:** Scans first 500 chars → `MISSING_RECORDING_DISCLOSURE` (HIGH)
+- **Missing refund policy:** Billing context check → `OMITTED_REFUND_POLICY` (MEDIUM)
+
+Timestamp offset: `character_position ÷ 15` (avg chars/second of speech).
+
+This tool **never calls Gemini.** Deterministic detection is the right design choice for PCI — an LLM getting 99.9% accuracy on card numbers is not good enough when the 0.1% is a compliance breach.
+
+### Tool 2 — `score_call_quality()` · Gemini Structured Output
+
+10 dimensions scored 1–5 integer via Pydantic `response_schema`:
+
+Empathy · Resolution Rate · Hold Time Rationale · Escalation Handling · First Call Resolution · Dead Air Management · Compliance Script Adherence · Professionalism · Customer Sentiment · Closing Procedure
+
+**Cache rule:** Checks `analysis_cache` for existing scorecard before calling Gemini. Returns cached result if found — scores are an audit record and do not change retroactively.
+
+### Tool 3 — `generate_remediation_ticket()` · Conditional
+
+Fires when: any CRITICAL or HIGH PCI violation **OR** `overall_score < 3.0`
+
+Returns `None` when: no violations AND score ≥ 3.0
+
+This conditional firing is what makes the agent reason rather than script — it evaluates both tool outputs before deciding whether a ticket is warranted.
 
 ---
 
 ## Demo Script
 
-Run these in order — matches the interview demo flow:
+Run these calls in order:
 
-| Step | Call | What to show |
+| Step | Call ID | What to show |
 |---|---|---|
-| 1 | **CALL-002** | PCI violation → CRITICAL ticket with timestamp offset |
-| 2 | **CALL-001** | Clean call → ✅ Compliant → "No false positives" |
-| 3 | **CALL-004** | Poor quality → MEDIUM coaching ticket, low dim scores |
-| 4 | **CALL-005** | PCI + poor quality → CRITICAL ticket + full coaching script |
+| 1 | CALL-002 | PCI violation → CRITICAL ticket with exact timestamp offset |
+| 2 | CALL-001 | Clean call → ✅ Compliant → "No false positives" |
+| 3 | CALL-004 | Poor quality → MEDIUM coaching ticket, low dimension scores |
+| 4 | CALL-005 | PCI + poor quality combined → CRITICAL ticket + full coaching script |
 | 5 | Audit trail | Expand SQLite section → "Everything is logged" |
-| 6 | Re-run CALL-002 | Identical result → "Scores are an audit record" |
+| 6 | Re-run CALL-002 | Identical result → "Scores are an audit record, not recomputed" |
 
-### Pre-built Transcripts
+---
+
+## Pre-built Transcripts
 
 | Call ID | Type | Planted Violation | Expected Output |
 |---|---|---|---|
 | CALL-001 | Clean | None | ✅ Compliant, no ticket |
-| CALL-002 | PCI violation | `4532 1234 5678 9010` spoken aloud | 🚨 CRITICAL ticket |
-| CALL-003 | Missing disclosure | No recording notice at start | ⚠️ HIGH ticket |
+| CALL-002 | PCI violation | Card number spoken aloud | 🚨 CRITICAL ticket + timestamp offset |
+| CALL-003 | Missing disclosure | No recording notice at call start | ⚠️ HIGH ticket |
 | CALL-004 | Poor quality | Unresolved, dead air, no empathy | 📋 MEDIUM coaching ticket |
-| CALL-005 | Combined worst case | PCI + missing disclosure + poor quality | 🚨 CRITICAL ticket |
+| CALL-005 | Combined worst case | PCI + missing disclosure + poor quality | 🚨 CRITICAL ticket + coaching script |
 
 ---
 
-## GCP Services Used
+## GCP Services
 
 | Service | Purpose |
 |---|---|
-| **Cloud Run** | Hosts single Streamlit container (one port, one process) |
-| **Artifact Registry** | Stores Docker image (`ccai-quality-agent` repo) |
-| **Cloud Build** | Triggered by GitHub Actions via Workload Identity Federation |
-| **Secret Manager** | Stores `GEMINI_API_KEY` — never hardcoded |
-| **Cloud Logging** | Structured JSON logs from Streamlit process |
-| **IAM** | SA `ccai-quality-agent-sa` with least-privilege roles |
+| Cloud Run | Single Streamlit container, port 8080 |
+| Artifact Registry | Docker image (`ccai-quality-agent` repo, us-central1) |
+| Secret Manager | `GEMINI_API_KEY` — never hardcoded |
+| Cloud Build | Triggered by GitHub Actions via Workload Identity Federation |
+| Cloud Logging | Structured JSON logs from the Streamlit process |
+| IAM | `ccai-quality-agent-sa` with least-privilege roles only |
+
+**Service account roles:**
+- `roles/run.invoker`
+- `roles/logging.logWriter`
+- `roles/secretmanager.secretAccessor`
 
 ---
 
-## Local Development
-
-### Prerequisites
-- Python 3.11
-- Docker Desktop
-- `GEMINI_API_KEY` in your environment
-
-### Run with Docker Compose
-
-```bash
-# Clone and enter repo
-git clone https://github.com/Xaaby/ccai-quality-agent.git
-cd ccai-quality-agent
-
-# Set your API key
-export GEMINI_API_KEY=your_key_here
-
-# Build and run (seeds SQLite at build time)
-docker-compose up --build
-```
-
-App available at: http://localhost:8080
-
-### Run locally without Docker
-
-```bash
-cd ccai-quality-agent
-
-# Install dependencies
-pip install -r app/requirements.txt
-
-# Seed the database
-python app/data/generate_transcripts.py
-
-# Run Streamlit
-GEMINI_API_KEY=your_key_here streamlit run app/streamlit_app.py --server.port 8080
-```
-
----
-
-## Deployment (GCP)
-
-### One-time setup (before first deploy)
-
-```bash
-# Create Artifact Registry repo
-gcloud artifacts repositories create ccai-quality-agent \
-  --repository-format=docker \
-  --location=us-central1
-
-# Create Secret Manager secret
-echo -n "your_gemini_api_key" | \
-  gcloud secrets create GEMINI_API_KEY --data-file=-
-
-# Configure Workload Identity Federation
-# (follow GCP docs — substitute YOUR_WIF_PROVIDER and YOUR_WIF_SERVICE_ACCOUNT in deploy.yml)
-```
-
-### Automated deploy
-
-Push to `main` → GitHub Actions builds image → pushes to Artifact Registry → deploys to Cloud Run.
-
-Substitute in `.github/workflows/deploy.yml`:
-- `YOUR_WIF_PROVIDER` → your WIF provider resource name
-- `YOUR_WIF_SERVICE_ACCOUNT` → your service account email
-
----
-
-## Project Structure
+## Repository Structure
 
 ```
 ccai-quality-agent/
 ├── app/
-│   ├── __init__.py
-│   ├── streamlit_app.py          ← single public process, port 8080
-│   ├── agent.py                  ← Gemini tool-calling loop (AFC disabled)
-│   ├── schemas.py                ← all Pydantic models
+│   ├── streamlit_app.py             ← single public process, port 8080
+│   ├── agent.py                     ← Gemini tool-calling loop (AFC disabled)
+│   ├── schemas.py                   ← all Pydantic models
 │   ├── tools/
-│   │   ├── __init__.py
 │   │   ├── audit_pci_compliance.py  ← Tool 1: regex + Luhn, zero Gemini
-│   │   ├── score_call_quality.py    ← Tool 2: Gemini structured output
+│   │   ├── score_call_quality.py    ← Tool 2: Gemini structured output + cache
 │   │   └── generate_ticket.py       ← Tool 3: conditional ticket
 │   ├── data/
-│   │   ├── __init__.py
 │   │   ├── generate_transcripts.py  ← seeds pipeline_calls.db
-│   │   └── pipeline_calls.db        ← SQLite (baked into image)
+│   │   └── pipeline_calls.db        ← SQLite baked into Docker image
 │   └── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .github/workflows/deploy.yml
 └── README.md
 ```
+
+---
+
+## Local Development
+
+```bash
+# Clone repo and install dependencies
+git clone https://github.com/Xaaby/ccai-quality-agent.git
+cd ccai-quality-agent
+pip install -r app/requirements.txt
+
+# Seed the database
+python app/data/generate_transcripts.py
+
+# Run
+GEMINI_API_KEY=your_key_here streamlit run app/streamlit_app.py --server.port 8080
+```
+
+Or with Docker:
+
+```bash
+export GEMINI_API_KEY=your_key_here
+docker-compose up --build
+# App at http://localhost:8080
+```
+
+---
+
+## How This Connects to Real Genesys
+
+In production, replace the SQLite transcripts with the **Genesys Cloud Conversations API** — every call is analyzed automatically post-completion with no daily cap. Violation tickets route to your existing ticketing system via webhook. The agent, tools, and scoring rubric are unchanged.
+
+The architecture is identical to what a Genesys Gold Partner would deploy as a QA complement layer on top of native AI Scoring.
