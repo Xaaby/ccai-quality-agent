@@ -13,3 +13,15 @@ services:
       # Mount app code for local dev hot-reload (remove in production)
       - ./app:/app/app
     restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8080"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./app/data:/app/app/data
+    restart: unless-stopped

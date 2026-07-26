@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONPATH=/app
+
+# Install dependencies first (layer caching)
+COPY app/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app/ ./app/
+
+# Generate SQLite database at build time (bakes transcripts into image)
+RUN python app/data/generate_transcripts.py
+
+# Expose single port — Cloud Run requirement
+EXPOSE 8080
+
+# FastAPI via Uvicorn — separate service from Streamlit standalone
+CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
