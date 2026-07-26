@@ -2,9 +2,11 @@
 
 A GCP-native AI agent that analyzes customer service call transcripts for PCI-DSS violations, scores call quality across 10 dimensions, and generates supervisor coaching tickets — deployed on Cloud Run with Gemini 2.5 Flash.
 
-**Live demo:** [https://ccai-quality-agent-786562162192.us-central1.run.app](https://ccai-quality-agent-786562162162.us-central1.run.app)
+**Live demo (Streamlit):** [https://ccai-quality-agent-786562162192.us-central1.run.app](https://ccai-quality-agent-786562162192.us-central1.run.app)
 
-**Stack:** Python 3.11 · Streamlit · Gemini 2.5 Flash · Pydantic · SQLite · Cloud Run · GitHub Actions
+**API endpoint:** [https://ccai-quality-agent-api-786562162192.us-central1.run.app](https://ccai-quality-agent-api-786562162192.us-central1.run.app)
+
+**Stack:** Python 3.11 · Streamlit · FastAPI · Uvicorn · Gemini 2.5 Flash · Pydantic · SQLite · Cloud Run · GitHub Actions
 
 ---
 
@@ -52,7 +54,9 @@ Tool 1: audit_pci_compliance()           Tool 2: score_call_quality()
                        remediation_tickets · analysis_cache
 ```
 
-**Single process on Cloud Run** — Streamlit is the only listener on port 8080. All tool logic is imported directly. No FastAPI, no two-port setup.
+**Two Cloud Run services:**
+- `ccai-quality-agent` — Streamlit standalone demo (port 8080)
+- `ccai-quality-agent-api` — FastAPI backend for the `compliance-intelligence-platform` wrapper (`POST /analyze`, `GET /health`, CORS open)
 
 ---
 
@@ -120,11 +124,12 @@ Run these calls in order:
 
 | Service | Purpose |
 |---|---|
-| Cloud Run | Single Streamlit container, port 8080 |
-| Artifact Registry | Docker image (`ccai-quality-agent` repo, us-central1) |
+| Cloud Run (`ccai-quality-agent`) | Streamlit standalone demo, port 8080 |
+| Cloud Run (`ccai-quality-agent-api`) | FastAPI backend for wrapper app, port 8080 |
+| Artifact Registry | Docker images (`ccai-quality-agent` repo, us-central1) |
 | Secret Manager | `GEMINI_API_KEY` — never hardcoded |
 | Cloud Build | Triggered by GitHub Actions via Workload Identity Federation |
-| Cloud Logging | Structured JSON logs from the Streamlit process |
+| Cloud Logging | Structured JSON logs from both services |
 | IAM | `ccai-quality-agent-sa` with least-privilege roles only |
 
 **Service account roles:**
@@ -139,9 +144,12 @@ Run these calls in order:
 ```
 ccai-quality-agent/
 ├── app/
-│   ├── streamlit_app.py             ← single public process, port 8080
+│   ├── streamlit_app.py             ← standalone demo, port 8080
 │   ├── agent.py                     ← Gemini tool-calling loop (AFC disabled)
 │   ├── schemas.py                   ← all Pydantic models
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── main.py                  ← FastAPI: POST /analyze, GET /health
 │   ├── tools/
 │   │   ├── audit_pci_compliance.py  ← Tool 1: regex + Luhn, zero Gemini
 │   │   ├── score_call_quality.py    ← Tool 2: Gemini structured output + cache
@@ -150,9 +158,11 @@ ccai-quality-agent/
 │   │   ├── generate_transcripts.py  ← seeds pipeline_calls.db
 │   │   └── pipeline_calls.db        ← SQLite baked into Docker image
 │   └── requirements.txt
-├── Dockerfile
+├── Dockerfile                       ← Streamlit image
+├── Dockerfile.api                   ← FastAPI image
 ├── docker-compose.yml
-├── .github/workflows/deploy.yml
+├── .github/workflows/deploy.yml     ← deploys ccai-quality-agent (Streamlit)
+├── .github/workflows/deploy-api.yml ← deploys ccai-quality-agent-api (FastAPI)
 └── README.md
 ```
 
@@ -173,12 +183,14 @@ python app/data/generate_transcripts.py
 GEMINI_API_KEY=your_key_here streamlit run app/streamlit_app.py --server.port 8080
 ```
 
-Or with Docker:
+Or with Docker (runs both services):
 
 ```bash
 export GEMINI_API_KEY=your_key_here
 docker-compose up --build
-# App at http://localhost:8080
+# Streamlit at http://localhost:8080
+# FastAPI   at http://localhost:8000
+# API docs  at http://localhost:8000/docs
 ```
 
 ---
