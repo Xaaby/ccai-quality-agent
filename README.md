@@ -4,7 +4,7 @@
 
 > **Genesys native QA: 50 evals/day cap, 20-min delay, no timestamp analysis. This agent fills the gap.**
 
-Live URL: *(assigned after first Cloud Run deploy)*
+Live URL: https://ccai-quality-agent-786562162192.us-central1.run.app
 
 ---
 
