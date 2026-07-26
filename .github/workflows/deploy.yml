@@ -1,0 +1,64 @@
+name: Deploy CCAI Quality Agent
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: earnest-sight-503519-t5
+  REGION: us-central1
+  SERVICE_NAME: ccai-quality-agent
+  IMAGE: us-central1-docker.pkg.dev/earnest-sight-503519-t5/ccai-quality-agent/ccai-quality-agent
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/786562162192/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: gcp-devops-agent-sa@earnest-sight-503519-t5.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ env.IMAGE }}:${{ github.sha }} -t ${{ env.IMAGE }}:latest .
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+          docker push ${{ env.IMAGE }}:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image=${{ env.IMAGE }}:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080 \
+            --memory=1Gi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --set-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest \
+            --project=${{ env.PROJECT_ID }}
+
+      - name: Show deployed URL
+        run: |
+          gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format='value(status.url)'

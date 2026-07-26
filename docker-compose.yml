@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  ccai-quality-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      # Mount app code for local dev hot-reload (remove in production)
+      - ./app:/app/app
+    restart: unless-stopped
