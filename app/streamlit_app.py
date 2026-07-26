@@ -5,10 +5,19 @@ Contact Center Compliance & Quality Agent — Supervisor Dashboard.
 Single public process on Cloud Run port 8080. No FastAPI. All tool logic in-process.
 """
 
+import sys
 import os
 import json
 import pathlib
+
+# Ensure project root is on sys.path so 'from app.X import Y' works
+# regardless of how Streamlit resolves the script directory.
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from app.agent import run_analysis
 from app.data.generate_transcripts import get_all_calls, get_audit_trail
